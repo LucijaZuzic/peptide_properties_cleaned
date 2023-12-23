@@ -1,15 +1,13 @@
-DATA_PATH = '../data/'
-MODEL_DATA_PATH = '../model_data/'
-SEQ_MODEL_DATA_PATH = '../seq_model_data/'
-MY_MODEL_DATA_PATH = '../only_my_model_data/' 
-TSNE_AP_SEQ_DATA_PATH = '../TSNE_ap_seq_model_data/' 
-TSNE_SEQ_DATA_PATH = '../TSNE_seq_model_data/' 
-MAXLEN = 24
-
 from seqprops import SequentialPropertiesEncoder  
 from sklearn.preprocessing import MinMaxScaler 
 import numpy as np
- 
+import pandas as pd
+
+DATA_PATH = '../data/'
+TMP_MODELS_PATH = '../models/tmp_models/'
+MODELS_PATH = '../models/'
+MAX_LEN = 24 
+
 def set_seed(x):
     seed_file = open(DATA_PATH + "seed.txt", "w")
     seed_file.write(str(x))
@@ -20,6 +18,9 @@ def get_seed():
     line = seed_file.readlines()[0].replace("\n", "")
     seed_file.close()
     return int(line)
+
+def randomize_seed():
+    set_seed(np.random.randint(1000000000))
 
 def data_and_labels_from_indices(all_data, all_labels, indices):
     data = []
@@ -80,7 +81,7 @@ def split_tripeptides(sequence, tripeptides_AP_scores):
 
     return ap_list
 
-def reshape_for_model(model_name, num_props, all_data, all_labels):
+def reshape_for_model(model_name, all_data, all_labels):
 
     labels = []
     for i in range(len(all_data)):
@@ -105,51 +106,52 @@ def reshape_for_model(model_name, num_props, all_data, all_labels):
     new_data = []
     last_data = []    
     for i in range(len(data)):
-        if len(data[i]) > 0 and i < num_props:  
+        if len(data[i]) > 0 and i < 3:  
             new_data.append(np.array(data[i]))
         if "AP" in model_name and "SP" in model_name:
-            if len(data[i]) > 0 and i >= num_props: 
+            if len(data[i]) > 0 and i >= 3: 
                 last_data.append(np.array(data[i])) 
 
     if len(last_data) > 0:
         last_data = np.array(last_data).transpose(1, 2, 0)
         new_data.append(last_data)
-  
-    if len(new_data) > 0:
-        new_data = np.array(new_data)
+        
     return new_data, labels 
    
-# Choose loading AP, APH, logP or polarity
-def load_data_AP(name = 'AP', offset = 1):
+def read_SA_data(SA_data):
+    sequences = []
+    labels = []
+
+    csv_data = pd.read_csv(DATA_PATH + SA_data, sep = ";", index_col = False) 
+    for i, peptide in enumerate(csv_data["peptide_sequence"]): 
+        if len(peptide) <= MAX_LEN and (str(csv_data["peptide_label"][i]) == "0" or str(csv_data["peptide_label"][i]) == "1"): 
+            sequences.append(peptide)
+            labels.append(str(csv_data["peptide_label"][i])) 
+    return sequences, labels
+
+def load_data_AP(offset = 1):
     # Load AP scores. 
-    amino_acids_AP = np.load(DATA_PATH+'amino_acids_'+name+'.npy', allow_pickle=True).item()
-    dipeptides_AP = np.load(DATA_PATH+'dipeptides_'+name+'.npy', allow_pickle=True).item()
-    tripeptides_AP = np.load(DATA_PATH+'tripeptides_'+name+'.npy', allow_pickle=True).item()
+    amino_acids_AP = np.load(DATA_PATH + 'amino_acids_AP.npy', allow_pickle = True).item()
+    dipeptides_AP = np.load(DATA_PATH + 'dipeptides_AP.npy', allow_pickle = True).item()
+    tripeptides_AP = np.load(DATA_PATH + 'tripeptides_AP.npy', allow_pickle = True).item()
     
-    # Scale scores to range [-1, 1].
+    # Scale scores to range [-offset, offset].
     scale(amino_acids_AP, offset)
     scale(dipeptides_AP, offset)
     scale(tripeptides_AP, offset)
 
     return amino_acids_AP, dipeptides_AP, tripeptides_AP
-
-def read_from_npy_SA(SA_data):
-    sequences = []
-    labels = []
-    for peptide in SA_data:
-        if len(peptide) > MAXLEN or SA_data[peptide] == '-1':
-            continue
-        sequences.append(peptide)
-        labels.append(SA_data[peptide])
-
-    return sequences, labels
-
-def load_data_SA_seq(SA_data, names=['AP'], offset = 1, properties_to_include = [], masking_value=2):
-    sequences, labels = read_from_npy_SA(SA_data)
+ 
+def load_data(model_name, SA_data, offset = 1, properties_to_include = [], masking_value = 2):
+    if ".csv" in SA_data:
+        sequences, labels = read_SA_data(SA_data)
+    else:
+        sequences, labels = SA_data[0], SA_data[1]
             
-    # Encode sequences
-    encoder = SequentialPropertiesEncoder(scaler=MinMaxScaler(feature_range=(-offset, offset)))
-    encoded_sequences = encoder.encode(sequences)
+    if "SP" in model_name and "TSNE" not in model_name:
+        # Encode sequences
+        encoder = SequentialPropertiesEncoder(scaler = MinMaxScaler(feature_range = (-offset, offset)))
+        encoded_sequences = encoder.encode(sequences)
      
     # Split peptides in two bins.
     # SA - has self-assembly, NSA - does not have self-assembly.
@@ -158,124 +160,69 @@ def load_data_SA_seq(SA_data, names=['AP'], offset = 1, properties_to_include = 
     NSA = []
     for index in range(len(sequences)):
         new_props = []
-        for name in names:
-            amino_acids_AP, dipeptides_AP, tripeptides_AP = load_data_AP(name, offset)  
+
+        if "AP" in model_name:
+        
+            amino_acids_AP, dipeptides_AP, tripeptides_AP = load_data_AP(offset)  
             amino_acids_ap = split_amino_acids(sequences[index], amino_acids_AP)
             dipeptides_ap = split_dipeptides(sequences[index], dipeptides_AP)
             tripeptides_ap = split_tripeptides(sequences[index], tripeptides_AP)
                     
-            amino_acids_ap_padded = padding(amino_acids_ap, len(encoded_sequences[index]), masking_value)
-            dipeptides_acids_ap_padded = padding(dipeptides_ap, len(encoded_sequences[index]), masking_value)
-            tripeptides_ap_padded = padding(tripeptides_ap, len(encoded_sequences[index]), masking_value)  
+            amino_acids_ap_padded = padding(amino_acids_ap, MAX_LEN + 1 * ("SP" in model_name and "TSNE" not in model_name), masking_value)
+            dipeptides_acids_ap_padded = padding(dipeptides_ap, MAX_LEN + 1 * ("SP" in model_name and "TSNE" not in model_name), masking_value)
+            tripeptides_ap_padded = padding(tripeptides_ap, MAX_LEN + 1 * ("SP" in model_name and "TSNE" not in model_name), masking_value)  
 
             new_props.append(amino_acids_ap_padded)
             new_props.append(dipeptides_acids_ap_padded)
             new_props.append(tripeptides_ap_padded) 
 
-            #new_props = read_mordred(sequences[index], new_props, len(encoded_sequences[index]), masking_value)
+        if "SP" in model_name and "TSNE" not in model_name:
+             
+            other_props = np.transpose(encoded_sequences[index])  
 
-        other_props = np.transpose(encoded_sequences[index])  
+            for prop_index in range(len(properties_to_include)):
+                if prop_index < len(other_props) and properties_to_include[prop_index] == 1:
+                    array = other_props[prop_index]
+                    for i in range(len(array)):
+                        if i >= len(sequences[index]):
+                            array[i] = masking_value
+                    new_props.append(array) 
+            
+            if "AP" not in model_name:
+                     
+                new_props = np.transpose(new_props)
+            
+        if "SP" in model_name and "TSNE" in model_name:
 
-        for prop_index in range(len(properties_to_include)):
-            if prop_index < len(other_props) and properties_to_include[prop_index] == 1:
-                array = other_props[prop_index]
-                for i in range(len(array)):
-                    if i >= len(sequences[index]):
-                        array[i] = masking_value
-                new_props.append(array)
-                 
-        new_props = np.transpose(new_props) 
+            feature_dict_1  = np.load(DATA_PATH + 'TSNE_SP_1.npy', allow_pickle = True).item() 
+            feature_dict_2  = np.load(DATA_PATH + 'TSNE_SP_2.npy', allow_pickle = True).item() 
+            feature_dict_3  = np.load(DATA_PATH + 'TSNE_SP_3.npy', allow_pickle = True).item() 
 
-        if labels[index] == '1':
+            feature1 = split_amino_acids(sequences[index], feature_dict_1)
+            feature1_padded = padding(feature1, MAX_LEN, masking_value)
+
+            feature2 = split_amino_acids(sequences[index], feature_dict_2)
+            feature2_padded = padding(feature2, MAX_LEN, masking_value)
+
+            feature3 = split_amino_acids(sequences[index], feature_dict_3)
+            feature3_padded = padding(feature3, MAX_LEN, masking_value)
+
+            new_props.append(feature1_padded)
+            new_props.append(feature2_padded)
+            new_props.append(feature3_padded) 
+
+        if str(labels[index]) == '1':
             SA.append(new_props) 
-        elif labels[index] == '0':
+        elif str(labels[index]) == '0':
             NSA.append(new_props) 
+
     if len(SA) > 0:
         SA = np.array(SA)
     if len(NSA) > 0:
         NSA = np.array(NSA)
+
     return SA, NSA
-
-def load_data_SA(SA_data, names=['AP'], offset = 1, properties_to_include = [], masking_value=2):
-    sequences, labels = read_from_npy_SA(SA_data)
-            
-    # Encode sequences
-    encoder = SequentialPropertiesEncoder(scaler=MinMaxScaler(feature_range=(-offset, offset)))
-    encoded_sequences = encoder.encode(sequences)
-     
-    # Split peptides in two bins.
-    # SA - has self-assembly, NSA - does not have self-assembly.
-    # Convert each peptide sequence to three lists of AP scores: amino acid, dipeptide and tripeptide scores.
-    SA = []
-    NSA = []
-    for index in range(len(sequences)):
-        new_props = []
-        for name in names:
-            amino_acids_AP, dipeptides_AP, tripeptides_AP = load_data_AP(name, offset)  
-            amino_acids_ap = split_amino_acids(sequences[index], amino_acids_AP)
-            dipeptides_ap = split_dipeptides(sequences[index], dipeptides_AP)
-            tripeptides_ap = split_tripeptides(sequences[index], tripeptides_AP)
-                    
-            amino_acids_ap_padded = padding(amino_acids_ap, len(encoded_sequences[index]), masking_value)
-            dipeptides_acids_ap_padded = padding(dipeptides_ap, len(encoded_sequences[index]), masking_value)
-            tripeptides_ap_padded = padding(tripeptides_ap, len(encoded_sequences[index]), masking_value)  
-        
-            new_props.append(amino_acids_ap_padded)
-            new_props.append(dipeptides_acids_ap_padded)
-            new_props.append(tripeptides_ap_padded)
-
-            #new_props = read_mordred(sequences[index], new_props, len(encoded_sequences[index]), masking_value)
-        
-        other_props = np.transpose(encoded_sequences[index])  
-
-        for prop_index in range(len(properties_to_include)):
-            if prop_index < len(other_props) and properties_to_include[prop_index] == 1:
-                array = other_props[prop_index]
-                for i in range(len(array)):
-                    if i >= len(sequences[index]):
-                        array[i] = masking_value
-                new_props.append(array) 
-        
-        if labels[index] == '1':
-            SA.append(new_props) 
-        elif labels[index] == '0':
-            NSA.append(new_props) 
-            
-    return SA, NSA
-
-def load_data_SA_AP(SA_data, names=['AP'], offset = 1, properties_to_include = [], masking_value=2):
-    sequences, labels = read_from_npy_SA(SA_data)
-     
-    # Split peptides in two bins.
-    # SA - has self-assembly, NSA - does not have self-assembly.
-    # Convert each peptide sequence to three lists of AP scores: amino acid, dipeptide and tripeptide scores.
-    SA = []
-    NSA = []
-    for index in range(len(sequences)):
-        new_props = []
-        for name in names:
-            amino_acids_AP, dipeptides_AP, tripeptides_AP = load_data_AP(name, offset)  
-            amino_acids_ap = split_amino_acids(sequences[index], amino_acids_AP)
-            dipeptides_ap = split_dipeptides(sequences[index], dipeptides_AP)
-            tripeptides_ap = split_tripeptides(sequences[index], tripeptides_AP)
-                    
-            amino_acids_ap_padded = padding(amino_acids_ap, MAXLEN, masking_value)
-            dipeptides_acids_ap_padded = padding(dipeptides_ap, MAXLEN, masking_value)
-            tripeptides_ap_padded = padding(tripeptides_ap, MAXLEN, masking_value)  
-        
-            new_props.append(amino_acids_ap_padded)
-            new_props.append(dipeptides_acids_ap_padded)
-            new_props.append(tripeptides_ap_padded) 
-
-            #new_props = read_mordred(sequences[index], new_props, MAXLEN, masking_value)
-        
-        if labels[index] == '1':
-            SA.append(new_props) 
-        elif labels[index] == '0':
-            NSA.append(new_props) 
-            
-    return SA, NSA
-
+ 
 def merge_data(SA, NSA):
     # Merge the bins and add labels
     merged_data = []
@@ -284,33 +231,24 @@ def merge_data(SA, NSA):
     for i in NSA:
         merged_data.append(i)
 
-    merged_labels = np.ones(len(SA) + len(NSA))
-    merged_labels[len(SA):] *= 0
-    return merged_data, merged_labels
-   
-def merge_data_AP(SA, NSA):
-    # Merge the bins and add labels
-    merged_data = []
-    for i in SA:
-        merged_data.append(i)
-    for i in NSA:
-        merged_data.append(i)
-
-    merged_labels = np.ones(len(SA) + len(NSA))
-    merged_labels[len(SA):] *= 0
-    return merged_data, merged_labels
-
-def merge_data_seq(SA, NSA):
-    # Merge the bins and add labels
-    merged_data = []
-    for i in SA:
-        merged_data.append(i)
-    for i in NSA:
-        merged_data.append(i)
     if len(merged_data) > 0:
         merged_data = np.array(merged_data)
-        #merged_data = np.reshape(merged_data, (len(merged_data), np.shape(merged_data[0])[0], np.shape(merged_data[0])[1]))
     merged_labels = np.ones(len(SA) + len(NSA))
     merged_labels[len(SA):] *= 0
-
     return merged_data, merged_labels
+
+def data_and_labels_from_indices(all_data, all_labels, indices):
+    data = []
+    labels = []
+
+    for i in indices:
+        data.append(all_data[i])
+        labels.append(all_labels[i]) 
+        
+    return data, labels 
+
+def convert_list(model_predictions):
+    new_predictions = []
+    for j in range(len(model_predictions)):
+        new_predictions.append(model_predictions[j][0])
+    return new_predictions
